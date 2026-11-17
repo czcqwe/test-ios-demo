@@ -1,395 +1,568 @@
-import 'dart:convert';
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  runApp(const ToolboxApp());
+  runApp(const TankBattleApp());
 }
 
-class ToolboxApp extends StatelessWidget {
-  const ToolboxApp({super.key});
+class TankBattleApp extends StatelessWidget {
+  const TankBattleApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '个人百宝箱',
+      title: '经典坦克大战',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        useMaterial3: true,
-      ),
-      home: const MainShell(),
+      theme: ThemeData.dark(),
+      home: const TankGamePage(),
     );
   }
 }
 
-class MainShell extends StatefulWidget {
-  const MainShell({super.key});
+enum Dir { up, down, left, right }
 
-  @override
-  State<MainShell> createState() => _MainShellState();
+class Bullet {
+  double x, y;
+  Dir dir;
+  bool isPlayer;
+  Bullet(this.x, this.y, this.dir, this.isPlayer);
 }
 
-class _MainShellState extends State<MainShell> {
-  int _currentIndex = 0;
-
-  final List<Widget> _pages = const [
-    DashboardPage(),
-    AiAssistantPage(),
-    BlindBoxPage(),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: IndexedStack(index: _currentIndex, children: _pages),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (i) => setState(() => _currentIndex = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: '看板'),
-          NavigationDestination(icon: Icon(Icons.auto_awesome_outlined), label: 'AI助手'),
-          NavigationDestination(icon: Icon(Icons.casino_outlined), label: '盲盒'),
-        ],
-      ),
-    );
-  }
+class Tank {
+  double x, y;
+  Dir dir;
+  bool isPlayer;
+  bool isFast;
+  int cooldown = 0;
+  int aiTurnTimer = 0;
+  Tank(this.x, this.y, this.dir, this.isPlayer, {this.isFast = false});
 }
 
-// ==================== 1. 今日看板 ====================
-class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key});
+class TankGamePage extends StatefulWidget {
+  const TankGamePage({super.key});
 
   @override
-  State<DashboardPage> createState() => _DashboardPageState();
+  State<TankGamePage> createState() => _TankGamePageState();
 }
 
-class _DashboardPageState extends State<DashboardPage> {
-  String _weatherText = '加载中...';
-  String _rateText = '加载中...';
-  String _quoteText = '加载中...';
-  bool _loading = false;
+class _TankGamePageState extends State<TankGamePage> {
+  static const int gridSize = 13;
+  static const int maxLevel = 5;
+
+  late List<List<int>> _map;
+  late Tank _player;
+  final List<Tank> _enemies = [];
+  final List<Bullet> _bullets = [];
+  final Random _rng = Random();
+
+  Timer? _loop;
+  Dir? _heldDir;
+  int _level = 1;
+  int _score = 0;
+  int _highScore = 0;
+  int _lives = 3;
+  int _enemiesToSpawn = 0;
+  int _spawnTimer = 0;
+  bool _gameOver = false;
+  bool _levelCleared = false;
+  bool _hasSave = false;
+  bool _showStartMenu = true;
 
   @override
   void initState() {
     super.initState();
-    _refreshAll();
+    _loadSaveInfo();
   }
 
-  Future<void> _refreshAll() async {
-    setState(() => _loading = true);
-    await Future.wait([_fetchWeather(), _fetchRate(), _fetchQuote()]);
-    if (mounted) setState(() => _loading = false);
+  Future<void> _loadSaveInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _highScore = prefs.getInt('highScore') ?? 0;
+      _hasSave = prefs.containsKey('savedLevel');
+    });
   }
 
-  Future<void> _fetchWeather() async {
-    try {
-      // 长沙经纬度 (28.23, 112.94)，完全免费免Key
-      final uri = Uri.parse(
-        'https://api.open-meteo.com/v1/forecast?latitude=28.23&longitude=112.94&current_weather=true',
-      );
-      final res = await http.get(uri).timeout(const Duration(seconds: 8));
-      final data = jsonDecode(res.body);
-      final current = data['current_weather'];
-      setState(() {
-        _weatherText = '当前气温 ${current['temperature']}°C · 风速 ${current['windspeed']} km/h';
-      });
-    } catch (_) {
-      setState(() => _weatherText = '天气获取失败，点击右上角重试');
+  Future<void> _saveProgress() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_score > _highScore) {
+      _highScore = _score;
+      await prefs.setInt('highScore', _highScore);
+    }
+    if (_gameOver) {
+      await prefs.remove('savedLevel');
+      await prefs.remove('savedScore');
+      await prefs.remove('savedLives');
+      _hasSave = false;
+    } else {
+      await prefs.setInt('savedLevel', _level);
+      await prefs.setInt('savedScore', _score);
+      await prefs.setInt('savedLives', _lives);
+      _hasSave = true;
     }
   }
 
-  Future<void> _fetchRate() async {
-    try {
-      final uri = Uri.parse('https://api.frankfurter.app/latest?from=USD&to=CNY,JPY');
-      final res = await http.get(uri).timeout(const Duration(seconds: 8));
-      final data = jsonDecode(res.body);
-      final rates = data['rates'];
-      setState(() {
-        _rateText = '1 美元 ≈ ${rates['CNY']} 人民币\n1 美元 ≈ ${rates['JPY']} 日元';
-      });
-    } catch (_) {
-      setState(() => _rateText = '汇率获取失败');
-    }
+  Future<void> _continueGame() async {
+    final prefs = await SharedPreferences.getInstance();
+    _level = prefs.getInt('savedLevel') ?? 1;
+    _score = prefs.getInt('savedScore') ?? 0;
+    _lives = prefs.getInt('savedLives') ?? 3;
+    _showStartMenu = false;
+    _startLevel(_level);
   }
 
-  Future<void> _fetchQuote() async {
-    try {
-      final uri = Uri.parse('https://v1.hitokoto.cn/?encode=json');
-      final res = await http.get(uri).timeout(const Duration(seconds: 8));
-      final data = jsonDecode(res.body);
-      setState(() {
-        _quoteText = '“${data['hitokoto']}”\n—— ${data['from'] ?? '佚名'}';
-      });
-    } catch (_) {
-      setState(() => _quoteText = '保持热爱，奔赴山海。');
+  void _newGame() {
+    _level = 1;
+    _score = 0;
+    _lives = 3;
+    _showStartMenu = false;
+    _startLevel(1);
+  }
+
+  void _nextLevel() {
+    if (_level < maxLevel) {
+      _level++;
+    } else {
+      _level = 1;
     }
+    _startLevel(_level);
+  }
+
+  void _startLevel(int level) {
+    _loop?.cancel();
+    _gameOver = false;
+    _levelCleared = false;
+    _heldDir = null;
+    _bullets.clear();
+    _enemies.clear();
+    _enemiesToSpawn = 6 + level * 2;
+    _spawnTimer = 60;
+
+    _map = _buildMap(level);
+    _player = Tank(4, 12, Dir.up, true);
+
+    _spawnOneEnemy(0);
+    _spawnOneEnemy(6);
+    _spawnOneEnemy(12);
+
+    _saveProgress();
+    _loop = Timer.periodic(const Duration(milliseconds: 33), (_) => _tick());
+    setState(() {});
+  }
+
+  List<List<int>> _buildMap(int level) {
+    // 基础基地保护结构，随关卡变化障碍
+    final m = List.generate(gridSize, (_) => List.filled(gridSize, 0));
+    // 老鹰基地 (6, 11) 及周围砖墙
+    m[10][5] = 1; m[10][6] = 1; m[10][7] = 1;
+    m[11][5] = 1; m[11][6] = 3; m[11][7] = 1;
+    m[12][5] = 1; m[12][6] = 1; m[12][7] = 1;
+
+    for (int y = 1; y <= 8; y++) {
+      for (int x = 1; x <= 11; x++) {
+        if (level == 1 && (x % 2 == 1) && y != 4 && y != 7) {
+          m[y][x] = (y == 2 && x == 6) ? 2 : 1;
+        } else if (level == 2 && (x + y) % 3 == 0) {
+          m[y][x] = (y == 5) ? 2 : 1;
+        } else if (level == 3 && (y == 3 || y == 6) && x != 6) {
+          m[y][x] = (x % 3 == 0) ? 2 : 1;
+        } else if (level == 4 && (x % 3 != 0) && (y % 2 == 0)) {
+          m[y][x] = (y == 4) ? 2 : 1;
+        } else if (level >= 5 && (x * y) % 4 == 1) {
+          m[y][x] = (y == 5) ? 2 : 1;
+        }
+      }
+    }
+    // 确保顶部出生点畅通
+    m[0][0] = 0; m[0][6] = 0; m[0][12] = 0;
+    return m;
+  }
+
+  void _spawnOneEnemy(int col) {
+    if (_enemiesToSpawn <= 0 || _enemies.length >= 4) return;
+    _enemiesToSpawn--;
+    final fast = _level >= 2 && _rng.nextInt(3) == 0;
+    _enemies.add(Tank(col.toDouble(), 0, Dir.down, false, isFast: fast));
+  }
+
+  void _tick() {
+    if (_gameOver || _levelCleared || _showStartMenu) return;
+
+    if (_heldDir != null) {
+      _player.dir = _heldDir!;
+      _moveTank(_player, 0.13);
+    }
+    if (_player.cooldown > 0) _player.cooldown--;
+
+    _spawnTimer++;
+    if (_spawnTimer > 90) {
+      _spawnTimer = 0;
+      _spawnOneEnemy([0, 6, 12][_rng.nextInt(3)]);
+    }
+
+    for (final e in _enemies) {
+      if (e.cooldown > 0) e.cooldown--;
+      e.aiTurnTimer--;
+      final moved = _moveTank(e, e.isFast ? 0.11 : 0.08);
+      if (!moved || e.aiTurnTimer <= 0) {
+        e.dir = Dir.values[_rng.nextInt(4)];
+        e.aiTurnTimer = 25 + _rng.nextInt(35);
+      }
+      if (e.cooldown == 0 && _rng.nextInt(28) == 0) {
+        _fire(e);
+      }
+    }
+
+    final toRemove = <Bullet>[];
+    for (final b in _bullets) {
+      switch (b.dir) {
+        case Dir.up:
+          b.y -= 0.28;
+          break;
+        case Dir.down:
+          b.y += 0.28;
+          break;
+        case Dir.left:
+          b.x -= 0.28;
+          break;
+        case Dir.right:
+          b.x += 0.28;
+          break;
+      }
+
+      final gx = b.x.round();
+      final gy = b.y.round();
+      if (gx < 0 || gx >= gridSize || gy < 0 || gy >= gridSize) {
+        toRemove.add(b);
+        continue;
+      }
+
+      final tile = _map[gy][gx];
+      if (tile == 1) {
+        _map[gy][gx] = 0;
+        toRemove.add(b);
+        continue;
+      } else if (tile == 2) {
+        toRemove.add(b);
+        continue;
+      } else if (tile == 3) {
+        _map[gy][gx] = 0;
+        _gameOver = true;
+        _saveProgress();
+        toRemove.add(b);
+        continue;
+      }
+
+      if (b.isPlayer) {
+        Tank? hitEnemy;
+        for (final e in _enemies) {
+          if ((e.x - b.x).abs() < 0.6 && (e.y - b.y).abs() < 0.6) {
+            hitEnemy = e;
+            break;
+          }
+        }
+        if (hitEnemy != null) {
+          _enemies.remove(hitEnemy);
+          toRemove.add(b);
+          _score += hitEnemy.isFast ? 200 : 100;
+          if (_enemies.isEmpty && _enemiesToSpawn == 0) {
+            _levelCleared = true;
+            _saveProgress();
+          }
+        }
+      } else {
+        if ((_player.x - b.x).abs() < 0.6 && (_player.y - b.y).abs() < 0.6) {
+          toRemove.add(b);
+          _lives--;
+          if (_lives <= 0) {
+            _gameOver = true;
+            _saveProgress();
+          } else {
+            _player = Tank(4, 12, Dir.up, true);
+            _saveProgress();
+          }
+        }
+      }
+    }
+    _bullets.removeWhere((b) => toRemove.contains(b));
+
+    setState(() {});
+  }
+
+  bool _moveTank(Tank t, double speed) {
+    double nx = t.x;
+    double ny = t.y;
+    switch (t.dir) {
+      case Dir.up:
+        ny -= speed;
+        break;
+      case Dir.down:
+        ny += speed;
+        break;
+      case Dir.left:
+        nx -= speed;
+        break;
+      case Dir.right:
+        nx += speed;
+        break;
+    }
+    if (nx < 0 || nx > gridSize - 1 || ny < 0 || ny > gridSize - 1) return false;
+    final gx = nx.round();
+    final gy = ny.round();
+    if (_map[gy][gx] != 0) return false;
+    t.x = nx;
+    t.y = ny;
+    return true;
+  }
+
+  void _fire(Tank t) {
+    if (_gameOver || _levelCleared || t.cooldown > 0) return;
+    t.cooldown = t.isPlayer ? 11 : 26;
+    _bullets.add(Bullet(t.x, t.y, t.dir, t.isPlayer));
+  }
+
+  @override
+  void dispose() {
+    _loop?.cancel();
+    super.dispose();
+  }
+
+  Widget _dirBtn(Dir dir, IconData icon) {
+    return GestureDetector(
+      onTapDown: (_) => _heldDir = dir,
+      onTapUp: (_) => _heldDir = null,
+      onTapCancel: () => _heldDir = null,
+      child: Container(
+        width: 54,
+        height: 54,
+        decoration: BoxDecoration(
+          color: Colors.grey.shade800,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey.shade600),
+        ),
+        child: Icon(icon, size: 30, color: Colors.white),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_showStartMenu) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('经典坦克大战', style: TextStyle(fontSize: 34, fontWeight: FontWeight.bold, color: Colors.amber)),
+              const SizedBox(height: 12),
+              Text('历史最高分: $_highScore', style: const TextStyle(fontSize: 16, color: Colors.grey)),
+              const SizedBox(height: 36),
+              if (_hasSave) ...[
+                SizedBox(
+                  width: 200,
+                  height: 48,
+                  child: FilledButton(onPressed: _continueGame, child: const Text('继续游戏')),
+                ),
+                const SizedBox(height: 14),
+              ],
+              SizedBox(
+                width: 200,
+                height: 48,
+                child: FilledButton.tonal(onPressed: _newGame, child: const Text('开始新游戏')),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final remaining = _enemies.length + _enemiesToSpawn;
+
     return Scaffold(
+      backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('今日看板'),
+        backgroundColor: Colors.grey.shade900,
+        title: Text('第$_level关  敌:$remaining  命:$_lives  分:$_score', style: const TextStyle(fontSize: 14)),
         actions: [
           IconButton(
-            icon: _loading
-                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.refresh),
-            onPressed: _loading ? null : _refreshAll,
+            icon: const Icon(Icons.save_outlined),
+            tooltip: '保存并返回菜单',
+            onPressed: () async {
+              await _saveProgress();
+              _loop?.cancel();
+              setState(() => _showStartMenu = true);
+            },
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      body: Column(
         children: [
-          _InfoCard(title: '天气 (长沙)', content: _weatherText, icon: Icons.wb_sunny_outlined),
-          const SizedBox(height: 12),
-          _InfoCard(title: '实时汇率', content: _rateText, icon: Icons.currency_exchange),
-          const SizedBox(height: 12),
-          _InfoCard(title: '每日一言', content: _quoteText, icon: Icons.format_quote),
-        ],
-      ),
-    );
-  }
-}
-
-class _InfoCard extends StatelessWidget {
-  final String title;
-  final String content;
-  final IconData icon;
-
-  const _InfoCard({required this.title, required this.content, required this.icon});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      color: Colors.indigo.shade50,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+          const SizedBox(height: 8),
+          Expanded(
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: 1,
+                child: Stack(
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        border: Border.all(color: Colors.grey.shade700, width: 2),
+                      ),
+                      child: CustomPaint(
+                        painter: _BattlePainter(_map, _player, _enemies, _bullets),
+                        size: Size.infinite,
+                      ),
+                    ),
+                    if (_levelCleared)
+                      Container(
+                        color: Colors.black54,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('第 $_level 关过关！', style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold, color: Colors.amber)),
+                              const SizedBox(height: 14),
+                              FilledButton(onPressed: _nextLevel, child: Text(_level < maxLevel ? '进入第 ${_level + 1} 关' : '通关！重新挑战')),
+                            ],
+                          ),
+                        ),
+                      ),
+                    if (_gameOver)
+                      Container(
+                        color: Colors.black54,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text('GAME OVER', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.redAccent)),
+                              const SizedBox(height: 8),
+                              Text('最终得分: $_score', style: const TextStyle(fontSize: 16)),
+                              const SizedBox(height: 14),
+                              FilledButton(onPressed: _newGame, child: const Text('重新开始')),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Icon(icon, size: 20, color: Colors.indigo),
-                const SizedBox(width: 8),
-                Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                Column(
+                  children: [
+                    _dirBtn(Dir.up, Icons.arrow_drop_up),
+                    Row(
+                      children: [
+                        _dirBtn(Dir.left, Icons.arrow_left),
+                        const SizedBox(width: 54),
+                        _dirBtn(Dir.right, Icons.arrow_right),
+                      ],
+                    ),
+                    _dirBtn(Dir.down, Icons.arrow_drop_down),
+                  ],
+                ),
+                GestureDetector(
+                  onTapDown: (_) => _fire(_player),
+                  child: Container(
+                    width: 88,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.red.shade200, width: 3),
+                    ),
+                    child: const Center(
+                      child: Text('开火', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                    ),
+                  ),
+                ),
               ],
             ),
-            const SizedBox(height: 10),
-            Text(content, style: const TextStyle(fontSize: 15, height: 1.5)),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ==================== 2. 私人 AI 助手 ====================
-class AiAssistantPage extends StatefulWidget {
-  const AiAssistantPage({super.key});
-
-  @override
-  State<AiAssistantPage> createState() => _AiAssistantPageState();
-}
-
-class _AiAssistantPageState extends State<AiAssistantPage> {
-  final TextEditingController _inputCtrl = TextEditingController();
-  String _baseUrl = 'https://api.deepseek.com/v1/chat/completions';
-  String _apiKey = '';
-  String _model = 'deepseek-chat';
-  String _reply = '点右上角齿轮填写 API Key 后即可使用。';
-  bool _sending = false;
-
-  Future<void> _askAi(String prefix) async {
-    final text = _inputCtrl.text.trim();
-    if (text.isEmpty) return;
-    if (_apiKey.isEmpty) {
-      setState(() => _reply = '请先点击右上角设置图标填入你的 API Key');
-      return;
-    }
-    setState(() {
-      _sending = true;
-      _reply = '思考中...';
-    });
-    try {
-      final res = await http
-          .post(
-            Uri.parse(_baseUrl),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $_apiKey',
-            },
-            body: jsonEncode({
-              'model': _model,
-              'messages': [
-                {'role': 'user', 'content': prefix.isEmpty ? text : '$prefix\n\n$text'}
-              ],
-            }),
-          )
-          .timeout(const Duration(seconds: 30));
-      final data = jsonDecode(utf8.decode(res.bodyBytes));
-      if (res.statusCode == 200) {
-        setState(() => _reply = data['choices'][0]['message']['content']);
-      } else {
-        setState(() => _reply = '请求出错 (${res.statusCode}): ${res.body}');
-      }
-    } catch (e) {
-      setState(() => _reply = '请求异常: $e');
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  void _openSettings() {
-    final urlCtrl = TextEditingController(text: _baseUrl);
-    final keyCtrl = TextEditingController(text: _apiKey);
-    final modelCtrl = TextEditingController(text: _model);
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('AI 接口设置'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'API URL')),
-            TextField(controller: keyCtrl, decoration: const InputDecoration(labelText: 'API Key'), obscureText: true),
-            TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model')),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-          FilledButton(
-            onPressed: () {
-              setState(() {
-                _baseUrl = urlCtrl.text.trim();
-                _apiKey = keyCtrl.text.trim();
-                _model = modelCtrl.text.trim();
-              });
-              Navigator.pop(context);
-            },
-            child: const Text('保存'),
           ),
         ],
       ),
     );
   }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('AI 随身助手'),
-        actions: [IconButton(icon: const Icon(Icons.settings), onPressed: _openSettings)],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            TextField(
-              controller: _inputCtrl,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                hintText: '输入要处理的内容或问题...',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              children: [
-                FilledButton.tonal(onPressed: _sending ? null : () => _askAi('请帮我润色这段话，使其更自然流畅：'), child: const Text('润色')),
-                FilledButton.tonal(onPressed: _sending ? null : () => _askAi('请将以下内容中英互译：'), child: const Text('翻译')),
-                FilledButton.tonal(onPressed: _sending ? null : () => _askAi('请从以下内容中提取待办事项列表：'), child: const Text('提取待办')),
-                FilledButton(onPressed: _sending ? null : () => _askAi(''), child: const Text('直接提问')),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade100,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: SingleChildScrollView(child: SelectableText(_reply, style: const TextStyle(fontSize: 15, height: 1.5))),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
-// ==================== 3. 随机盲盒 ====================
-class BlindBoxPage extends StatefulWidget {
-  const BlindBoxPage({super.key});
+class _BattlePainter extends CustomPainter {
+  final List<List<int>> map;
+  final Tank player;
+  final List<Tank> enemies;
+  final List<Bullet> bullets;
+
+  _BattlePainter(this.map, this.player, this.enemies, this.bullets);
 
   @override
-  State<BlindBoxPage> createState() => _BlindBoxPageState();
-}
+  void paint(Canvas canvas, Size size) {
+    final cell = size.width / 13;
 
-class _BlindBoxPageState extends State<BlindBoxPage> {
-  final List<String> _foods = ['猪脚饭', '麻辣烫', '黄焖鸡', '轻食沙拉', '牛肉面', '汉堡', '火锅'];
-  final List<String> _movies = [
-    '《星际穿越》- 科幻神作',
-    '《肖申克的救赎》- 经典必看',
-    '《疯狂动物城》- 轻松治愈',
-    '《让子弹飞》- 百看不厌',
-    '《白日梦想家》- 适合放空',
-    '《时空恋旅人》- 温暖爱情',
-  ];
-  final Random _random = Random();
-  String _result = '点下面按钮开盲盒';
+    for (int y = 0; y < 13; y++) {
+      for (int x = 0; x < 13; x++) {
+        final t = map[y][x];
+        if (t == 0) continue;
+        final rect = Rect.fromLTWH(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
+        if (t == 1) {
+          canvas.drawRect(rect, Paint()..color = Colors.brown.shade400);
+        } else if (t == 2) {
+          canvas.drawRect(rect, Paint()..color = Colors.grey.shade400);
+        } else if (t == 3) {
+          canvas.drawRect(rect, Paint()..color = Colors.amber);
+        }
+      }
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('随手盲盒')),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-              decoration: BoxDecoration(
-                color: Colors.indigo.shade50,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                _result,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: FilledButton(
-                onPressed: () => setState(() => _result = _foods[_random.nextInt(_foods.length)]),
-                child: const Text('今天吃什么'),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: FilledButton.tonal(
-                onPressed: () => setState(() => _result = _movies[_random.nextInt(_movies.length)]),
-                child: const Text('随机推一部电影'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    _drawTank(canvas, player, cell, Colors.yellow);
+    for (final e in enemies) {
+      _drawTank(canvas, e, cell, e.isFast ? Colors.purpleAccent : Colors.redAccent);
+    }
+
+    final bulletPaint = Paint()..color = Colors.white;
+    for (final b in bullets) {
+      canvas.drawCircle(
+        Offset((b.x + 0.5) * cell, (b.y + 0.5) * cell),
+        cell * 0.14,
+        bulletPaint,
+      );
+    }
   }
+
+  void _drawTank(Canvas canvas, Tank t, double cell, Color color) {
+    final cx = (t.x + 0.5) * cell;
+    final cy = (t.y + 0.5) * cell;
+    final body = Rect.fromCenter(center: Offset(cx, cy), width: cell * 0.78, height: cell * 0.78);
+    canvas.drawRect(body, Paint()..color = color);
+
+    final barrelPaint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = cell * 0.16
+      ..strokeCap = StrokeCap.round;
+    Offset end;
+    switch (t.dir) {
+      case Dir.up:
+        end = Offset(cx, cy - cell * 0.48);
+        break;
+      case Dir.down:
+        end = Offset(cx, cy + cell * 0.48);
+        break;
+      case Dir.left:
+        end = Offset(cx - cell * 0.48, cy);
+        break;
+      case Dir.right:
+        end = Offset(cx + cell * 0.48, cy);
+        break;
+    }
+    canvas.drawLine(Offset(cx, cy), end, barrelPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
