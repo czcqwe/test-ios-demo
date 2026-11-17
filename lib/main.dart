@@ -30,6 +30,12 @@ class Bullet {
   Bullet(this.x, this.y, this.dir, this.isPlayer);
 }
 
+class Explosion {
+  double x, y;
+  int life = 10;
+  Explosion(this.x, this.y);
+}
+
 class Tank {
   double x, y;
   Dir dir;
@@ -51,10 +57,12 @@ class _TankGamePageState extends State<TankGamePage> {
   static const int gridSize = 13;
   static const int maxLevel = 5;
 
+  // 0:空地, 1:砖墙, 2:钢板, 3:老鹰基地, 4:草丛(可穿过/遮挡), 5:河流(坦克不可过/子弹可过)
   late List<List<int>> _map;
   late Tank _player;
   final List<Tank> _enemies = [];
   final List<Bullet> _bullets = [];
+  final List<Explosion> _explosions = [];
   final Random _rng = Random();
 
   Timer? _loop;
@@ -121,11 +129,7 @@ class _TankGamePageState extends State<TankGamePage> {
   }
 
   void _nextLevel() {
-    if (_level < maxLevel) {
-      _level++;
-    } else {
-      _level = 1;
-    }
+    _level = _level < maxLevel ? _level + 1 : 1;
     _startLevel(_level);
   }
 
@@ -136,6 +140,7 @@ class _TankGamePageState extends State<TankGamePage> {
     _heldDir = null;
     _bullets.clear();
     _enemies.clear();
+    _explosions.clear();
     _enemiesToSpawn = 6 + level * 2;
     _spawnTimer = 60;
 
@@ -152,29 +157,31 @@ class _TankGamePageState extends State<TankGamePage> {
   }
 
   List<List<int>> _buildMap(int level) {
-    // 基础基地保护结构，随关卡变化障碍
     final m = List.generate(gridSize, (_) => List.filled(gridSize, 0));
-    // 老鹰基地 (6, 11) 及周围砖墙
     m[10][5] = 1; m[10][6] = 1; m[10][7] = 1;
     m[11][5] = 1; m[11][6] = 3; m[11][7] = 1;
     m[12][5] = 1; m[12][6] = 1; m[12][7] = 1;
 
     for (int y = 1; y <= 8; y++) {
       for (int x = 1; x <= 11; x++) {
-        if (level == 1 && (x % 2 == 1) && y != 4 && y != 7) {
-          m[y][x] = (y == 2 && x == 6) ? 2 : 1;
-        } else if (level == 2 && (x + y) % 3 == 0) {
-          m[y][x] = (y == 5) ? 2 : 1;
-        } else if (level == 3 && (y == 3 || y == 6) && x != 6) {
-          m[y][x] = (x % 3 == 0) ? 2 : 1;
-        } else if (level == 4 && (x % 3 != 0) && (y % 2 == 0)) {
-          m[y][x] = (y == 4) ? 2 : 1;
-        } else if (level >= 5 && (x * y) % 4 == 1) {
-          m[y][x] = (y == 5) ? 2 : 1;
+        if (level == 1) {
+          if (x % 2 == 1 && y != 4 && y != 7) m[y][x] = (y == 2 && x == 6) ? 2 : 1;
+          if (y == 5 && (x == 2 || x == 10)) m[y][x] = 4;
+        } else if (level == 2) {
+          if ((x + y) % 3 == 0) m[y][x] = (y == 5) ? 2 : 1;
+          if (y == 4 && (x >= 2 && x <= 4 || x >= 8 && x <= 10)) m[y][x] = 5;
+        } else if (level == 3) {
+          if ((y == 3 || y == 6) && x != 6) m[y][x] = (x % 3 == 0) ? 2 : 1;
+          if (y == 7 && (x == 3 || x == 9)) m[y][x] = 4;
+        } else if (level == 4) {
+          if (x % 3 != 0 && y % 2 == 0) m[y][x] = (y == 4) ? 2 : 1;
+          if (y == 5 && x >= 4 && x <= 8) m[y][x] = 5;
+        } else {
+          if ((x * y) % 4 == 1) m[y][x] = (y == 5) ? 2 : 1;
+          if (y == 3 && (x == 2 || x == 10)) m[y][x] = 4;
         }
       }
     }
-    // 确保顶部出生点畅通
     m[0][0] = 0; m[0][6] = 0; m[0][12] = 0;
     return m;
   }
@@ -241,6 +248,7 @@ class _TankGamePageState extends State<TankGamePage> {
       final tile = _map[gy][gx];
       if (tile == 1) {
         _map[gy][gx] = 0;
+        _explosions.add(Explosion(gx.toDouble(), gy.toDouble()));
         toRemove.add(b);
         continue;
       } else if (tile == 2) {
@@ -248,6 +256,7 @@ class _TankGamePageState extends State<TankGamePage> {
         continue;
       } else if (tile == 3) {
         _map[gy][gx] = 0;
+        _explosions.add(Explosion(gx.toDouble(), gy.toDouble()));
         _gameOver = true;
         _saveProgress();
         toRemove.add(b);
@@ -263,6 +272,7 @@ class _TankGamePageState extends State<TankGamePage> {
           }
         }
         if (hitEnemy != null) {
+          _explosions.add(Explosion(hitEnemy.x, hitEnemy.y));
           _enemies.remove(hitEnemy);
           toRemove.add(b);
           _score += hitEnemy.isFast ? 200 : 100;
@@ -273,6 +283,7 @@ class _TankGamePageState extends State<TankGamePage> {
         }
       } else {
         if ((_player.x - b.x).abs() < 0.6 && (_player.y - b.y).abs() < 0.6) {
+          _explosions.add(Explosion(_player.x, _player.y));
           toRemove.add(b);
           _lives--;
           if (_lives <= 0) {
@@ -286,6 +297,11 @@ class _TankGamePageState extends State<TankGamePage> {
       }
     }
     _bullets.removeWhere((b) => toRemove.contains(b));
+
+    for (final ex in _explosions) {
+      ex.life--;
+    }
+    _explosions.removeWhere((ex) => ex.life <= 0);
 
     setState(() {});
   }
@@ -310,7 +326,9 @@ class _TankGamePageState extends State<TankGamePage> {
     if (nx < 0 || nx > gridSize - 1 || ny < 0 || ny > gridSize - 1) return false;
     final gx = nx.round();
     final gy = ny.round();
-    if (_map[gy][gx] != 0) return false;
+    final tile = _map[gy][gx];
+    // 草丛(4)和空地(0)可穿过；砖墙(1)、钢板(2)、老鹰(3)、河流(5)不可穿过
+    if (tile != 0 && tile != 4) return false;
     t.x = nx;
     t.y = ny;
     return true;
@@ -412,7 +430,7 @@ class _TankGamePageState extends State<TankGamePage> {
                         border: Border.all(color: Colors.grey.shade700, width: 2),
                       ),
                       child: CustomPaint(
-                        painter: _BattlePainter(_map, _player, _enemies, _bullets),
+                        painter: _BattlePainter(_map, _player, _enemies, _bullets, _explosions),
                         size: Size.infinite,
                       ),
                     ),
@@ -498,52 +516,115 @@ class _BattlePainter extends CustomPainter {
   final Tank player;
   final List<Tank> enemies;
   final List<Bullet> bullets;
+  final List<Explosion> explosions;
 
-  _BattlePainter(this.map, this.player, this.enemies, this.bullets);
+  _BattlePainter(this.map, this.player, this.enemies, this.bullets, this.explosions);
 
   @override
   void paint(Canvas canvas, Size size) {
     final cell = size.width / 13;
 
+    // 1. 先画砖墙(1)、钢板(2)、老鹰(3)、河流(5)
     for (int y = 0; y < 13; y++) {
       for (int x = 0; x < 13; x++) {
         final t = map[y][x];
-        if (t == 0) continue;
-        final rect = Rect.fromLTWH(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
-        if (t == 1) {
-          canvas.drawRect(rect, Paint()..color = Colors.brown.shade400);
-        } else if (t == 2) {
-          canvas.drawRect(rect, Paint()..color = Colors.grey.shade400);
-        } else if (t == 3) {
-          canvas.drawRect(rect, Paint()..color = Colors.amber);
-        }
+        if (t == 1) _drawBrick(canvas, x * cell, y * cell, cell);
+        if (t == 2) _drawSteel(canvas, x * cell, y * cell, cell);
+        if (t == 3) _drawEagle(canvas, x * cell, y * cell, cell);
+        if (t == 5) _drawWater(canvas, x * cell, y * cell, cell);
       }
     }
 
-    _drawTank(canvas, player, cell, Colors.yellow);
+    // 2. 画坦克
+    _drawTank(canvas, player, cell, Colors.amber.shade400);
     for (final e in enemies) {
       _drawTank(canvas, e, cell, e.isFast ? Colors.purpleAccent : Colors.redAccent);
     }
 
+    // 3. 画子弹
     final bulletPaint = Paint()..color = Colors.white;
     for (final b in bullets) {
-      canvas.drawCircle(
-        Offset((b.x + 0.5) * cell, (b.y + 0.5) * cell),
-        cell * 0.14,
-        bulletPaint,
-      );
+      canvas.drawCircle(Offset((b.x + 0.5) * cell, (b.y + 0.5) * cell), cell * 0.13, bulletPaint);
     }
+
+    // 4. 画草丛(4)在坦克上层，实现半隐身效果
+    for (int y = 0; y < 13; y++) {
+      for (int x = 0; x < 13; x++) {
+        if (map[y][x] == 4) _drawGrass(canvas, x * cell, y * cell, cell);
+      }
+    }
+
+    // 5. 画爆炸火花
+    for (final ex in explosions) {
+      final cx = (ex.x + 0.5) * cell;
+      final cy = (ex.y + 0.5) * cell;
+      final r = cell * (0.2 + (10 - ex.life) * 0.04);
+      canvas.drawCircle(Offset(cx, cy), r, Paint()..color = Colors.orangeAccent.withOpacity(ex.life / 10));
+      canvas.drawCircle(Offset(cx, cy), r * 0.5, Paint()..color = Colors.yellow);
+    }
+  }
+
+  void _drawBrick(Canvas canvas, double x, double y, double s) {
+    final bg = Paint()..color = const Color(0xFF9C4A2B);
+    final mortar = Paint()
+      ..color = Colors.black54
+      ..strokeWidth = 1.2;
+    canvas.drawRect(Rect.fromLTWH(x + 1, y + 1, s - 2, s - 2), bg);
+    canvas.drawLine(Offset(x + 1, y + s * 0.5), Offset(x + s - 1, y + s * 0.5), mortar);
+    canvas.drawLine(Offset(x + s * 0.5, y + 1), Offset(x + s * 0.5, y + s * 0.5), mortar);
+    canvas.drawLine(Offset(x + s * 0.25, y + s * 0.5), Offset(x + s * 0.25, y + s - 1), mortar);
+    canvas.drawLine(Offset(x + s * 0.75, y + s * 0.5), Offset(x + s * 0.75, y + s - 1), mortar);
+  }
+
+  void _drawSteel(Canvas canvas, double x, double y, double s) {
+    canvas.drawRect(Rect.fromLTWH(x + 1, y + 1, s - 2, s - 2), Paint()..color = Colors.grey.shade500);
+    canvas.drawRect(Rect.fromLTWH(x + s * 0.22, y + s * 0.22, s * 0.56, s * 0.56), Paint()..color = Colors.grey.shade300);
+  }
+
+  void _drawEagle(Canvas canvas, double x, double y, double s) {
+    final p = Paint()..color = Colors.amber;
+    final cx = x + s * 0.5;
+    final cy = y + s * 0.5;
+    canvas.drawCircle(Offset(cx, cy - s * 0.15), s * 0.14, p);
+    canvas.drawRect(Rect.fromCenter(center: Offset(cx, cy + s * 0.1), width: s * 0.55, height: s * 0.22), p);
+    canvas.drawRect(Rect.fromCenter(center: Offset(cx, cy + s * 0.26), width: s * 0.24, height: s * 0.16), p);
+  }
+
+  void _drawWater(Canvas canvas, double x, double y, double s) {
+    canvas.drawRect(Rect.fromLTWH(x + 1, y + 1, s - 2, s - 2), Paint()..color = Colors.blue.shade800);
+    final wave = Paint()
+      ..color = Colors.lightBlueAccent.withOpacity(0.5)
+      ..strokeWidth = 1.5;
+    canvas.drawLine(Offset(x + s * 0.2, y + s * 0.35), Offset(x + s * 0.8, y + s * 0.35), wave);
+    canvas.drawLine(Offset(x + s * 0.2, y + s * 0.65), Offset(x + s * 0.8, y + s * 0.65), wave);
+  }
+
+  void _drawGrass(Canvas canvas, double x, double y, double s) {
+    canvas.drawRect(Rect.fromLTWH(x + 1, y + 1, s - 2, s - 2), Paint()..color = Colors.green.shade700.withOpacity(0.78));
   }
 
   void _drawTank(Canvas canvas, Tank t, double cell, Color color) {
     final cx = (t.x + 0.5) * cell;
     final cy = (t.y + 0.5) * cell;
-    final body = Rect.fromCenter(center: Offset(cx, cy), width: cell * 0.78, height: cell * 0.78);
-    canvas.drawRect(body, Paint()..color = color);
+    final trackPaint = Paint()..color = Colors.grey.shade700;
 
+    // 履带
+    if (t.dir == Dir.up || t.dir == Dir.down) {
+      canvas.drawRect(Rect.fromCenter(center: Offset(cx - cell * 0.28, cy), width: cell * 0.18, height: cell * 0.78), trackPaint);
+      canvas.drawRect(Rect.fromCenter(center: Offset(cx + cell * 0.28, cy), width: cell * 0.18, height: cell * 0.78), trackPaint);
+    } else {
+      canvas.drawRect(Rect.fromCenter(center: Offset(cx, cy - cell * 0.28), width: cell * 0.78, height: cell * 0.18), trackPaint);
+      canvas.drawRect(Rect.fromCenter(center: Offset(cx, cy + cell * 0.28), width: cell * 0.78, height: cell * 0.18), trackPaint);
+    }
+
+    // 车体与炮塔
+    canvas.drawRect(Rect.fromCenter(center: Offset(cx, cy), width: cell * 0.52, height: cell * 0.52), Paint()..color = color);
+    canvas.drawCircle(Offset(cx, cy), cell * 0.18, Paint()..color = Colors.white70);
+
+    // 炮管
     final barrelPaint = Paint()
       ..color = Colors.white
-      ..strokeWidth = cell * 0.16
+      ..strokeWidth = cell * 0.14
       ..strokeCap = StrokeCap.round;
     Offset end;
     switch (t.dir) {
